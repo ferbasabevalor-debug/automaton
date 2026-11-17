@@ -52,8 +52,53 @@ function saveConfig(apiKey: string, walletAddress: string): void {
   });
 }
 
+/** Max full provisioning attempts, each with a fresh nonce. */
+const PROVISION_ATTEMPTS = 3;
+/** Generous timeouts: Conway can be slow under load. */
+const AUTH_TIMEOUT_MS = 90_000;
+
+/** Error from one provisioning attempt, flagged if a fresh attempt may succeed. */
+class ProvisionAttemptError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = "ProvisionAttemptError";
+  }
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 /**
- * Run the full SIWE provisioning flow:
+ * Provision a Conway API key, retrying the WHOLE flow (new nonce, new
+ * signature) when an attempt fails for a transient reason.
+ *
+ * The verify step is never retried on its own: the nonce is single-use, so
+ * re-sending the same signed message after a timeout or 5xx (when the server
+ * may already have consumed the nonce) always fails with
+ * "Invalid or expired nonce".
+ */
+export async function provision(
+  apiUrl?: string,
+  solanaIdentity?: ChainIdentity,
+): Promise<ProvisionResult> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= PROVISION_ATTEMPTS; attempt++) {
+    try {
+      return await provisionOnce(apiUrl, solanaIdentity);
+    } catch (err) {
+      lastError = err;
+      const retryable =
+        err instanceof ProvisionAttemptError ? err.retryable : true; // network errors / timeouts
+      if (!retryable || attempt === PROVISION_ATTEMPTS) break;
+      await new Promise((r) => setTimeout(r, 5_000 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Run the full SIWE provisioning flow once:
  * 1. Load wallet
  * 2. Get nonce from Conway API
  * 3. Sign SIWE message
@@ -61,7 +106,7 @@ function saveConfig(apiKey: string, walletAddress: string): void {
  * 5. Create API key
  * 6. Save to config.json
  */
-export async function provision(
+async function provisionOnce(
   apiUrl?: string,
   solanaIdentity?: ChainIdentity,
 ): Promise<ProvisionResult> {
@@ -74,12 +119,17 @@ export async function provision(
   const isSolana = identity.chainType === "solana";
 
   // 2. Get nonce
+  // A fresh nonce on every attempt; no inner retries, so we never sign a
+  // nonce that a retried request has already superseded.
   const nonceResp = await httpClient.request(`${url}/v1/auth/nonce`, {
     method: "POST",
+    retries: 0,
+    timeout: AUTH_TIMEOUT_MS,
   });
   if (!nonceResp.ok) {
-    throw new Error(
+    throw new ProvisionAttemptError(
       `Failed to get nonce: ${nonceResp.status} ${await nonceResp.text()}`,
+      isRetryableStatus(nonceResp.status),
     );
   }
   const { nonce } = (await nonceResp.json()) as { nonce: string };
@@ -123,16 +173,21 @@ export async function provision(
     verifyBody.chain_type = "solana";
   }
 
+  // Single-use nonce: never retry this request with the same message.
   const verifyResp = await httpClient.request(`${url}/v1/auth/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(verifyBody),
+    retries: 0,
+    timeout: AUTH_TIMEOUT_MS,
   });
 
   if (!verifyResp.ok) {
     const protocol = isSolana ? "SIWS" : "SIWE";
-    throw new Error(
-      `${protocol} verification failed: ${verifyResp.status} ${await verifyResp.text()}`,
+    const text = await verifyResp.text();
+    throw new ProvisionAttemptError(
+      `${protocol} verification failed: ${verifyResp.status} ${text}`,
+      isRetryableStatus(verifyResp.status) || /nonce/i.test(text),
     );
   }
 
@@ -148,11 +203,15 @@ export async function provision(
       Authorization: `Bearer ${access_token}`,
     },
     body: JSON.stringify({ name: "conway-automaton" }),
+    // Not retried: a retry after a timeout could create a duplicate key.
+    retries: 0,
+    timeout: AUTH_TIMEOUT_MS,
   });
 
   if (!keyResp.ok) {
-    throw new Error(
+    throw new ProvisionAttemptError(
       `Failed to create API key: ${keyResp.status} ${await keyResp.text()}`,
+      isRetryableStatus(keyResp.status),
     );
   }
 
