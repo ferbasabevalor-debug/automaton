@@ -103,10 +103,20 @@ en USDC. Empieza pequeño, gasta lo mínimo y explica en tus notas lo que haces.
 
 ## 5. Pasos en Railway
 
-Están al final del Pull Request y en la conversación con Claude. Resumen:
-
-1. Fusiona (merge) el Pull Request en GitHub.
-2. Railway → New Project → Deploy from GitHub repo → elige este repo.
+1. Railway → New Project → Deploy from GitHub repo → elige este repo.
+2. **Importante (monorepo):** este repo tiene un subpaquete auxiliar (`packages/cli`)
+   y Railway puede crear solo un servicio llamado `@conway/automaton-cli` con
+   Builder "Railpack". Ese **no** es el agente. En su pestaña **Settings** deja:
+   - **Root Directory**: vacío (o `/`)
+   - **Config as Code → Railway Config File**: `/railway.json` (con la barra inicial)
+   - **Builder**: `Dockerfile`
+   - **Custom Build Command**, **Custom Start Command** y **Watch Paths**: vacíos
+   - Nombre del servicio (arriba del todo): por ejemplo `automaton`
 3. Añade las variables obligatorias.
 4. Añade un Volume con mount path `/data`.
 5. Abre los logs, copia la dirección de la wallet y envíale USDC **en la red Base**.
+
+Para saber si está bien: en los logs de **build** debe aparecer "Using Detected
+Dockerfile" o pasos `RUN apt-get`/`pnpm build`, y en los de **deploy** la línea
+"Conway Automaton v0.2.1 starting...". Si ves `pnpm --filter @conway/automaton-cli`,
+sigue usando la configuración equivocada.
