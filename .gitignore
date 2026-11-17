@@ -1,6 +1,5 @@
 node_modules
 dist
-.env
 *.log
 .DS_Store
 *.db
@@ -8,6 +7,20 @@ dist
 *.db-wal
 *.db-shm
 *.tgz
-.automaton/wallet.json
-.automaton/state.db
 
+# ── Secrets: never commit ──────────────────────────────────────
+# Environment files (keep only the documented template)
+.env
+.env.*
+!.env.example
+# Agent state directory and files that contain private keys / API keys
+.automaton/
+**/.automaton/
+**/wallet.json
+**/automaton.json
+**/inference-providers.json
+# Key material
+*.pem
+*.key
+id_rsa*
+id_ed25519*

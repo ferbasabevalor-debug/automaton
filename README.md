@@ -24,6 +24,8 @@ Update: development of Automaton has continued across Conway's internal RL envir
 
 ## Quick Start
 
+> **Railway / Docker (no terminal):** see [RAILWAY.md](RAILWAY.md) (en español). The first run configures itself from environment variables ([.env.example](.env.example)) and prints the wallet funding instructions in the logs.
+
 ```bash
 git clone https://github.com/Conway-Research/automaton.git
 cd automaton

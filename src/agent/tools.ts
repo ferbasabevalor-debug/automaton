@@ -322,6 +322,10 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           return `Credit topup failed: ${result.error}`;
         }
 
+        // Count against the daily top-up allowance (MAX_DAILY_SPEND_USD)
+        const { recordTopup } = await import("./daily-spend-cap.js");
+        recordTopup(ctx.db.raw, "topup_credits", amountUsd * 100);
+
         // Record transaction
         const { ulid } = await import("ulid");
         ctx.db.insertTransaction({
@@ -3362,6 +3366,23 @@ export async function executeTool(
           } catch (error) {
             logger.error(
               "Spend tracking failed for transfer_credits",
+              error instanceof Error ? error : undefined,
+            );
+          }
+        }
+      } else if (toolName === "fund_child" && result.startsWith("Funded child")) {
+        const amount = args.amount_cents as number | undefined;
+        if (amount && amount > 0) {
+          try {
+            turnContext.sessionSpend.recordSpend({
+              toolName: "fund_child",
+              amountCents: amount,
+              recipient: args.child_id as string | undefined,
+              category: "transfer",
+            });
+          } catch (error) {
+            logger.error(
+              "Spend tracking failed for fund_child",
               error instanceof Error ? error : undefined,
             );
           }

@@ -84,6 +84,13 @@ export async function getWallet(chainType?: ChainType): Promise<{
     fs.mkdirSync(AUTOMATON_DIR, { recursive: true, mode: 0o700 });
   }
 
+  // Optional: import an existing key from WALLET_PRIVATE_KEY (hosted deploys).
+  // Only used to create wallet.json when it does not exist yet; an existing
+  // wallet file is never overwritten, so a key can never be silently lost.
+  if (!fs.existsSync(WALLET_FILE)) {
+    importWalletFromEnv(chainType);
+  }
+
   if (fs.existsSync(WALLET_FILE)) {
     const walletData: WalletData = JSON.parse(
       fs.readFileSync(WALLET_FILE, "utf-8"),
@@ -138,6 +145,44 @@ export async function getWallet(chainType?: ChainType): Promise<{
   });
 
   return { account, chainIdentity: new EvmChainIdentity(account), chainType: "evm", isNew: true };
+}
+
+/**
+ * If WALLET_PRIVATE_KEY is set, write wallet.json from it.
+ * EVM: 0x-prefixed (or bare) 64-hex-char key. Solana: base58 64-byte secret key.
+ * The key itself is never logged.
+ */
+function importWalletFromEnv(chainType?: ChainType): void {
+  const raw = process.env.WALLET_PRIVATE_KEY?.trim();
+  if (!raw) return;
+
+  const envChain = process.env.AUTOMATON_CHAIN?.trim().toLowerCase();
+  const resolvedChain: ChainType =
+    chainType || (envChain === "solana" ? "solana" : "evm");
+
+  let walletData: WalletData;
+  if (resolvedChain === "solana") {
+    let secretKey: Uint8Array;
+    try {
+      secretKey = bs58.decode(raw);
+    } catch {
+      throw new Error("WALLET_PRIVATE_KEY is not a valid base58 Solana secret key");
+    }
+    if (secretKey.length !== 64) {
+      throw new Error("WALLET_PRIVATE_KEY must be a 64-byte Solana secret key (base58)");
+    }
+    walletData = { chainType: "solana", secretKey: raw, createdAt: new Date().toISOString() };
+  } else {
+    const hex = raw.startsWith("0x") ? raw : `0x${raw}`;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) {
+      throw new Error("WALLET_PRIVATE_KEY must be a 32-byte hex private key (0x + 64 hex characters)");
+    }
+    // Validate it produces an account before persisting.
+    privateKeyToAccount(hex as `0x${string}`);
+    walletData = { chainType: "evm", privateKey: hex as `0x${string}`, createdAt: new Date().toISOString() };
+  }
+
+  fs.writeFileSync(WALLET_FILE, JSON.stringify(walletData, null, 2), { mode: 0o600 });
 }
 
 /**

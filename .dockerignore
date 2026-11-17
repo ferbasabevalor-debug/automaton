@@ -1,0 +1,20 @@
+# Never send secrets or local state into the image build.
+.git
+node_modules
+**/node_modules
+dist
+**/dist
+.env
+.env.*
+!.env.example
+.automaton
+**/wallet.json
+**/automaton.json
+**/inference-providers.json
+*.pem
+*.key
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log

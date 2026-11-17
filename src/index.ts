@@ -36,6 +36,22 @@ import { prettySink } from "./observability/pretty-sink.js";
 import { bootstrapTopup } from "./conway/topup.js";
 import { randomUUID } from "crypto";
 import { keccak256, toHex } from "viem";
+import {
+  shouldUseEnvSetup,
+  runEnvSetup,
+  ensurePersistentWalletStorage,
+  logFundingInstructions,
+  haltWithMessage,
+} from "./setup/env-setup.js";
+import {
+  createDailySpendCapRule,
+  getDailyCapStatus,
+  canTopupToday,
+  recordTopup,
+  MIN_TOPUP_TIER_USD,
+  clampTreasuryToDailyCap,
+  getDailySpendCapCents,
+} from "./agent/daily-spend-cap.js";
 
 const logger = createLogger("main");
 const VERSION = "0.2.1";
@@ -70,6 +86,11 @@ Environment:
   CONWAY_API_URL           Conway API URL (default: https://api.conway.tech)
   CONWAY_API_KEY           Conway API key (overrides config)
   OLLAMA_BASE_URL          Ollama base URL (overrides config, e.g. http://localhost:11434)
+  MAX_DAILY_SPEND_USD      Daily spend cap in USD (default: 2)
+
+  Non-interactive setup (Railway, Docker, no terminal) — see .env.example:
+  AUTOMATON_GENESIS_PROMPT, AUTOMATON_CREATOR_ADDRESS, AUTOMATON_NAME,
+  AUTOMATON_CHAIN, WALLET_PRIVATE_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
 `);
     process.exit(0);
   }
@@ -186,17 +207,49 @@ Version:    ${config.version}
 async function run(): Promise<void> {
   logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
 
-  // Load config — first run triggers interactive setup wizard
+  // Load config — first run triggers setup. On hosted platforms (Railway,
+  // no terminal) setup is read from environment variables, without questions.
+  const envSetup = shouldUseEnvSetup();
+  if (envSetup) {
+    await ensurePersistentWalletStorage();
+  }
   let config = loadConfig();
   if (!config) {
-    const { runSetupWizard } = await import("./setup/wizard.js");
-    config = await runSetupWizard();
+    if (envSetup) {
+      config = await runEnvSetup();
+    } else {
+      const { runSetupWizard } = await import("./setup/wizard.js");
+      config = await runSetupWizard();
+    }
   }
 
   // Load wallet (chain-aware)
   const { account, chainIdentity, chainType: walletChainType } = await getWallet();
   const resolvedChainType = config.chainType || walletChainType || "evm";
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
+
+  // Always tell the operator where to send funds (public address only).
+  logFundingInstructions(chainIdentity.address, resolvedChainType);
+
+  let apiKey = config.conwayApiKey || loadApiKeyFromConfig();
+  // Hosted deploys: retry automatic provisioning every 5 minutes (e.g. Conway
+  // was unreachable on first boot) instead of crash-looping.
+  while (!apiKey && envSetup) {
+    try {
+      const result = await provision(
+        config.conwayApiUrl,
+        resolvedChainType === "solana" ? chainIdentity : undefined,
+      );
+      apiKey = result.apiKey;
+      config.conwayApiKey = apiKey;
+      logger.info(`Clave de Conway obtenida automáticamente (${result.keyPrefix}...).`);
+    } catch (err: any) {
+      console.log(
+        `❌ No hay clave de Conway todavía (${err.message}). Reintento en 5 minutos. ` +
+          "También puedes poner CONWAY_API_KEY en Railway → Variables.",
+      );
+      await sleep(5 * 60_000);
+    }
+  }
   if (!apiKey) {
     logger.error("No API key found. Run: automaton --provision");
     process.exit(1);
@@ -308,8 +361,13 @@ async function run(): Promise<void> {
   }
 
   // Initialize PolicyEngine + SpendTracker (Phase 1.4)
-  const treasuryPolicy = config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY;
+  const treasuryPolicy = clampTreasuryToDailyCap(
+    config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY,
+    getDailySpendCapCents(),
+  );
   const rules = createDefaultRules(treasuryPolicy);
+  // Global daily spend cap (MAX_DAILY_SPEND_USD), applied to every money-moving tool.
+  rules.push(createDailySpendCapRule(db.raw));
   const policyEngine = new PolicyEngine(db.raw, rules);
   const spendTracker = new SpendTracker(db.raw);
 
@@ -347,6 +405,15 @@ async function run(): Promise<void> {
       await Promise.race([
         (async () => {
           const creditsCents = await conway.getCreditsBalance().catch(() => 0);
+          const capStatus = getDailyCapStatus(db.raw);
+          logger.info(
+            `[${new Date().toISOString()}] Saldo: créditos Conway $${(creditsCents / 100).toFixed(2)} · gastado hoy $${(capStatus.spentCents / 100).toFixed(2)} de $${(capStatus.capCents / 100).toFixed(2)} (MAX_DAILY_SPEND_USD)`,
+          );
+          const topupAllowed = canTopupToday(db.raw, MIN_TOPUP_TIER_USD * 100);
+          if (!topupAllowed.allowed) {
+            logger.info(`[${new Date().toISOString()}] Bootstrap topup skipped: ${topupAllowed.reason}`);
+            return;
+          }
           const topupResult = await bootstrapTopup({
             apiUrl: config.conwayApiUrl,
             account,
@@ -354,6 +421,7 @@ async function run(): Promise<void> {
             chainType: resolvedChainType,
           });
           if (topupResult?.success) {
+            recordTopup(db.raw, "bootstrap_topup", topupResult.amountUsd * 100);
             logger.info(
               `[${new Date().toISOString()}] Bootstrap topup: +$${topupResult.amountUsd} credits from USDC`,
             );

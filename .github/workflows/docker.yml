@@ -1,0 +1,20 @@
+name: Docker build
+# Checks that the Railway/Docker image still builds. Nothing is pushed.
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t automaton:ci .
+      - name: Smoke test (setup halts cleanly without required variables)
+        run: |
+          set +e
+          docker run --rm -e RAILWAY_ENVIRONMENT=ci -e RAILWAY_VOLUME_MOUNT_PATH=/data automaton:ci > out.txt 2>&1 &
+          sleep 20
+          docker ps -q --filter ancestor=automaton:ci | xargs -r docker kill >/dev/null
+          cat out.txt
+          grep -q "AUTOMATON_GENESIS_PROMPT" out.txt
