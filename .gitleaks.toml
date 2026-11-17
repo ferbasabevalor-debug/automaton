@@ -1,0 +1,28 @@
+# gitleaks configuration: default rules plus checks specific to this project.
+title = "automaton secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "conway-api-key"
+description = "Conway API key"
+regex = '''cnwy_k_[A-Za-z0-9_\-]{10,}'''
+keywords = ["cnwy_k_"]
+
+[[rules]]
+id = "evm-private-key-assignment"
+description = "EVM private key assigned to a variable or JSON field"
+regex = '''(?i)(private[_-]?key|privateKey|WALLET_PRIVATE_KEY)["']?\s*[:=]\s*["']?(0x)?[0-9a-f]{64}\b'''
+keywords = ["private"]
+
+[allowlist]
+description = "Public, well-known test keys and transaction hashes"
+regexes = [
+  # Hardhat / Anvil default test account #0 (publicly known, holds no funds)
+  '''0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+]
+paths = [
+  '''pnpm-lock\.yaml''',
+  '''package-lock\.json''',
+]

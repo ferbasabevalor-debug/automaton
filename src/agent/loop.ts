@@ -65,6 +65,7 @@ import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
+import { getDailyCapStatus, msUntilNextUtcDay } from "./daily-spend-cap.js";
 
 const logger = createLogger("loop");
 const MAX_TOOL_CALLS_PER_TURN = 10;
@@ -594,6 +595,23 @@ export async function runAgentLoop(
 
       // Clear pending input after use
       pendingInput = undefined;
+
+      // ── Daily spend cap (MAX_DAILY_SPEND_USD) ──
+      // Checked before every inference call: once today's spend reaches the
+      // cap, the agent sleeps until the cap resets at 00:00 UTC.
+      const capStatus = getDailyCapStatus(db.raw);
+      if (capStatus.exceeded) {
+        const sleepMs = msUntilNextUtcDay();
+        log(
+          config,
+          `[DAILY CAP] Tope diario alcanzado: gastado $${(capStatus.spentCents / 100).toFixed(2)} de $${(capStatus.capCents / 100).toFixed(2)} (MAX_DAILY_SPEND_USD). Durmiendo hasta las 00:00 UTC.`,
+        );
+        db.setKV("sleep_until", new Date(Date.now() + sleepMs).toISOString());
+        db.setAgentState("sleeping");
+        onStateChange?.("sleeping");
+        running = false;
+        break;
+      }
 
       // ── Inference Call (via router when available) ──
       const survivalTier = getSurvivalTier(financial.creditsCents);

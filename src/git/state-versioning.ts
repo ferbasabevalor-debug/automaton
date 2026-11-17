@@ -11,6 +11,14 @@ import { gitInit, gitCommit, gitStatus, gitLog } from "./tools.js";
 
 const AUTOMATON_DIR = "~/.automaton";
 
+/** Files in the state dir that contain private keys or API keys. */
+const SECRET_STATE_FILES = [
+  "wallet.json",
+  "config.json",
+  "automaton.json",
+  "inference-providers.json",
+];
+
 function resolveHome(p: string): string {
   const home = process.env.HOME || "/root";
   if (p.startsWith("~")) {
@@ -35,6 +43,13 @@ export async function initStateRepo(
   );
 
   if (checkResult.stdout.trim() === "exists") {
+    // Older state repos may lack newer ignore rules: add any missing ones and
+    // untrack files that hold secrets, so they can never be committed/pushed.
+    const secretFiles = SECRET_STATE_FILES.join(" ");
+    await conway.exec(
+      `cd ${dir} && touch .gitignore && for f in ${secretFiles}; do grep -qxF "$f" .gitignore || echo "$f" >> .gitignore; done && git rm --cached --quiet --ignore-unmatch ${secretFiles} >/dev/null 2>&1; true`,
+      10000,
+    );
     return;
   }
 
@@ -45,6 +60,12 @@ export async function initStateRepo(
   const gitignore = `# Sensitive files - never commit
 wallet.json
 config.json
+automaton.json
+inference-providers.json
+.env
+.env.*
+*.key
+*.pem
 state.db
 state.db-wal
 state.db-shm
